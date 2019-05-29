@@ -1,0 +1,382 @@
+---
+title: "Statistics & Machine Learning"
+author: "Marc Henrion"
+date: "29 May 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, fig.width = 10)
+```
+
+
+## Load R packages
+```{r libLoad, warning=F, message=F}
+library(tidyverse)
+library(RColorBrewer)
+library(tidyverse)
+library(gridExtra)
+library(MASS)
+library(rms) # for splines
+library(glmnet) # for ridge, lasso, elastic net
+library(caret) # for various methods
+library(mvtnorm) # for computing bivariate normal density
+```
+
+## Generate some data
+
+```{r genDat}
+set.seed(12345) # for reproducibility
+
+x<-runif(100,min=0.25,max=3)
+y<-10-2/x+rnorm(length(x),mean=0,sd=1)
+
+regDat<-data.frame(x=x,y=y)
+
+for(j in 1:6){
+  regDat[,paste(sep="","v",j)]<-rnorm(length(x)) # for the penalisation methods
+}
+
+classDat<-data.frame(class=c(rep("c1",50),rep("c2",100)),x=NA,y=NA)
+classDat[classDat$class=="c1",c("x","y")]<-mvrnorm(sum(classDat$class=="c1"),mu=c(1,2),Sigma=diag(1,2))
+classDat[classDat$class=="c2",c("x","y")]<-mvrnorm(sum(classDat$class=="c2"),mu=c(2,1),Sigma=matrix(byrow=T,nrow=2,c(0.5,-0.2,-0.2,0.5)))
+
+newRegDat<-data.frame(x=seq(0.25,3,length=1000))
+newClassDat<-expand.grid(x=seq(-1,4.5,length=300),y=seq(-1,4.5,length=300))
+
+save(regDat,classDat,newRegDat,newClassDat,file=paste(sep="","regClassDat_",Sys.Date(),".RData"))
+
+# simple data plots
+p0a<-ggplot() + 
+  geom_point(data=regDat,mapping=aes(x=x,y=y),size=3) +
+  ggtitle("regression data")
+
+p0b<-ggplot() + 
+  geom_point(data=classDat,mapping=aes(col=class,x=x,y=y,pch=class),size=3) + 
+  xlim(-1,4.25) + ylim(-1,4.25) +
+  coord_fixed(ratio = 1) +
+  ggtitle("classification / clustering data")
+
+grid.arrange(p0a,p0b,ncol=2)
+
+
+densC1<-dmvnorm(x=newClassDat,mean=c(1,2),sigma=diag(1,2))
+densC2<-dmvnorm(x=newClassDat,mean=c(2,1),sigma=matrix(byrow=T,nrow=2,c(0.5,-0.2,-0.2,0.5)))
+priorC1<-50/150
+priorC2<-100/150
+postC1<-priorC1*densC1/(priorC1*densC1+priorC2*densC2)
+newClassDat$bayesClassif<-factor(ifelse(postC1>0.5,"c1","c2"))
+newClassDat$bayesClassifNum<-postC1
+newClassDat$trueC1dens<-densC1
+newClassDat$trueC2dens<-densC2
+
+p0bwithBayesClassif<-p0b + 
+  geom_point(mapping=aes(x=x,y=y,col=bayesClassif),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=bayesClassifNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  geom_contour(mapping=aes(x=x,y=y,z=trueC1dens),data=newClassDat,color="red",lwd=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=trueC2dens),data=newClassDat,color="blue",lwd=0.5) +
+  ggtitle("Bayes classifier (with true generating distributions) - classification boundary")
+
+grid.arrange(p0a,p0bwithBayesClassif,ncol=2)
+```
+
+
+## 1. GLM
+
+```{r glm}
+m1<-lm(y~x,data=regDat)
+pred1<-data.frame(predict(m1,newdata=newRegDat,interval="confidence"))
+newRegDat$lwr<-pred1$lwr
+newRegDat$upr<-pred1$upr
+newRegDat$fit<-pred1$fit
+polyDat<-data.frame(x=c(newRegDat$x,newRegDat$x[nrow(newRegDat):1]),y=c(newRegDat$lwr,newRegDat$upr[nrow(newRegDat):1]))
+
+p1reg<-p0a + 
+  geom_polygon(data=polyDat,mapping=aes(x=x,y=y),color=NA,fill="darkgrey",alpha=0.5) +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=fit), color="blue", linetype="solid") +
+  ggtitle("GLM")
+
+print(p1reg)
+
+m1class<-glm(family="binomial",class~x+y,data=classDat)
+newClassDat$pred1class<-predict(m1class,newdata=newClassDat,type="response")
+newClassDat$pred1classBin<-factor(ifelse(newClassDat$pred1class>0.5,"c2","c1"))
+
+p1class<- p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred1classBin),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred1class),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("GLM - logistic regression classification boundary")
+
+print(p1class)
+```
+
+
+## 2. Splines & GAM
+
+```{r splinesGAMs}
+m2a<-lm(y~lsp(x,1),data=regDat)
+pred2a<-data.frame(predict(m2a,newdata=newRegDat,interval="confidence"))
+newRegDat$lwr<-pred2a$lwr
+newRegDat$upr<-pred2a$upr
+newRegDat$fit<-pred2a$fit
+polyDat<-data.frame(x=c(newRegDat$x,newRegDat$x[nrow(newRegDat):1]),y=c(newRegDat$lwr,newRegDat$upr[nrow(newRegDat):1]))
+
+p2a<-p0a +
+  geom_polygon(data=polyDat,mapping=aes(x=x,y=y),color=NA,fill="darkgrey",alpha=0.5) +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=fit), color="blue", linetype="solid") +
+  ggtitle("Linear spline (1 knot)")
+
+m2b<-lm(y~rcs(x,3),data=regDat)
+pred2b<-data.frame(predict(m2b,newdata=newRegDat,interval="confidence"))
+newRegDat$lwr<-pred2b$lwr
+newRegDat$upr<-pred2b$upr
+newRegDat$fit<-pred2b$fit
+polyDat<-data.frame(x=c(newRegDat$x,newRegDat$x[nrow(newRegDat):1]),y=c(newRegDat$lwr,newRegDat$upr[nrow(newRegDat):1]))
+
+p2b<-p0a +
+  geom_polygon(data=polyDat,mapping=aes(x=x,y=y),color=NA,fill="darkgrey",alpha=0.5) +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=fit), color="blue", linetype="solid") +
+  ggtitle("Restricted cubic spline (3 knots)")
+
+
+grid.arrange(p2a,p2b,nrow=2)
+```
+
+
+## 3. Regularisation
+
+```{r regul}
+m3_elnet<-glmnet(y=regDat$y,x=as.matrix(regDat[,-2]),alpha=0.5)
+m3_ridge<-glmnet(y=regDat$y,x=as.matrix(regDat[,-2]),alpha=0)
+m3_lasso<-glmnet(y=regDat$y,x=as.matrix(regDat[,-2]),alpha=1)
+
+par(mfrow=c(1,2),mar=c(5,4,6,1))
+plot(m3_ridge,main="ridge regression",label=T,xvar="lambda",lwd=2)
+plot(m3_lasso,main="lasso regression",label=T,xvar="norm",lwd=2)
+```
+
+
+## 4. simple classification / clustering: kNN, k-means
+
+### 4.1 kNN
+
+```{r kNN}
+m4knn<-train(class ~ x + y, data = classDat,
+                 method = "knn",
+                 preProcess = c("center", "scale"), # (centering &) scaling recommended as otherwise variables on large numerical scales will dominate the distance metric
+                 tuneGrid=data.frame(k=15)) # number of nearest neighbours; could also have R select this for us via CV but for illustration purposes we fix this here (otherwise we would first specify parameters for the CV...)
+
+newClassDat$pred4knn<-predict(m4knn,newdata=newClassDat)
+newClassDat$pred4knnNum<-as.integer(newClassDat$pred4knn)-1
+
+p4knn<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred4knn),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred4knnNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("nearest neighbour (k=15) classification boundary")
+
+print(p4knn)
+
+m4knnReg<-train(y ~ x, data = regDat,
+             method = "knn",
+             preProcess = c("center", "scale"), # (centering &) scaling recommended as otherwise variables on large numerical scales will dominate the distance metric
+             tuneGrid=data.frame(k=15)) # number of nearest neighbours; could also have R select this for us via CV but for illustration purposes we fix this here (otherwise we would first specify parameters for the CV...)
+
+newRegDat$pred4knnReg<-predict(m4knnReg,newdata=newRegDat)
+
+p4knnReg<-p0a +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=pred4knnReg), color="blue", linetype="solid") +
+  ggtitle("kNN regression (k=15)")
+
+print(p4knnReg)
+```
+
+### 4.2 k-means
+
+```{r kMeans}
+m4kmeans<-kmeans(classDat[,c("x","y")], centers=2, nstart=20) # in practice, just as for kNN, you would probably want to do first center & scale....
+classDat$kmeans<-factor(m4kmeans$cluster)
+classC1<-as.character(names(sort(table(classDat$class[classDat$kmeans==1]),decreasing=TRUE))[1]) # this work here, but could backfire if one class is overwhelmingly more common than the other and both clusters aredominated by that class...
+classC2<-as.character(names(sort(table(classDat$class[classDat$kmeans==2]),decreasing=TRUE))[1]) # this work here, but could backfire if one class is overwhelmingly more common than the other and both clusters aredominated by that class...
+
+nearestCentroid<-function(x,kmeans) {
+  centDist<-apply(kmeans$centers, MARGIN=1, FUN=function(y){sqrt(sum((x-y)^2))})
+  return(which.min(centDist)[1])
+}
+
+newClassDat$pred4kmeans<-factor(ifelse(apply(newClassDat[,c("x","y")],MARGIN=1,FUN=nearestCentroid,kmeans=m4kmeans)==1,classC1,classC2))
+newClassDat$pred4kmeansNum<-as.integer(newClassDat$pred4kmeans)-1
+
+p4kmeansClust<-ggplot() + 
+  geom_point(data=classDat,mapping=aes(x=x,y=y,pch=kmeans),col="black",alpha=0.5,cex=5) + 
+  geom_point(data=classDat,mapping=aes(x=x,y=y,col=class),cex=2) +
+  xlim(-1,4.25) + ylim(-1,4.25) +
+  ggtitle("k-means clustering")
+
+print(p4kmeansClust)
+
+p4kmeansClass<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred4kmeans),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred4kmeansNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("k-means classification boundary")
+
+print(p4kmeansClass)
+```
+
+
+## 5. kernel density estimation & classification
+
+```{r kde}
+dens1<-kde2d(x=classDat$x[classDat$class=="c1"],y=classDat$y[classDat$class=="c1"],n=300,lims=c(c(-1,4.25),c(-1,4.25)))
+dens2<-kde2d(x=classDat$x[classDat$class=="c2"],y=classDat$y[classDat$class=="c2"],n=300,lims=c(c(-1,4.25),c(-1,4.25)))
+prior1<-sum(classDat$class=="c1")/nrow(classDat)
+prior2<-sum(classDat$class=="c2")/nrow(classDat)
+class1Post<-prior1*dens1$z/(prior1*dens1$z+prior2*dens2$z) # only can do this because we evaluated dens1, dens2 on the same grid!
+class2Post<-prior2*dens2$z/(prior1*dens1$z+prior2*dens2$z) # not needed; only added for the sake of completeness
+class1PostVect<-as.vector(class1Post)
+
+tmpGr<-expand.grid(dens1$x,dens1$y)
+tmpClassDat<-data.frame(x=tmpGr[,1],y=tmpGr[,2],pred5KernDensNum=class1PostVect,pred5KernDens=factor(ifelse(class1PostVect>0.5,"c1","c2")),class1Dens=as.vector(dens1$z),class2Dens=as.vector(dens2$z))
+
+p5kerndensClass<-p0b + 
+  geom_point(mapping=aes(x=x,y=y,col=pred5KernDens),data=tmpClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred5KernDensNum),data=tmpClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  geom_contour(mapping=aes(x=x,y=y,z=class1Dens),data=tmpClassDat,color="red",lwd=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=class2Dens),data=tmpClassDat,color="blue",lwd=0.5) +
+  ggtitle("Kernel density estimation - classification boundary")
+
+print(p5kerndensClass)
+```
+
+## 6. mixture models & EM algorithm
+
+No R code for this section.
+
+##  7. LDA, QDA, RDA
+
+```{r discAnal}
+m7lda<-train(class ~ x + y, data = classDat, method = "lda") 
+
+newClassDat$pred7lda<-predict(m7lda,newdata=newClassDat)
+newClassDat$pred7ldaNum<-as.integer(newClassDat$pred7lda)-1
+
+m7qda<-train(class ~ x + y, data = classDat, method = "qda") 
+
+newClassDat$pred7qda<-predict(m7qda,newdata=newClassDat)
+newClassDat$pred7qdaNum<-as.integer(newClassDat$pred7qda)-1
+
+p7lda<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred7lda),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred7ldaNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("LDA classification boundary")
+
+p7qda<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred7qda),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred7qdaNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("QDA classification boundary")
+
+grid.arrange(p7lda,p7qda,ncol=2)
+```
+
+## 8. Decision trees & random forest
+
+### 8.1 CART
+
+```{r cart}
+m8cartClass<-train(class ~ x + y, data = classDat, method = "rpart", tuneGrid=data.frame(cp=0)) # as this is a simple example, the graph will be more interesting for a fully grown tree, hence set cost-complexiy parameter to 0
+
+newClassDat$pred8cartClass<-predict(m8cartClass,newdata=newClassDat)
+newClassDat$pred8cartClassNum<-as.integer(newClassDat$pred8cartClass)-1
+
+p8cartClass<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred8cartClass),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred8cartClassNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("CART decision tree (fully grown) classification boundary")
+
+m8cartReg<-train(y ~ x, data = regDat, method = "rpart")
+newRegDat$pred8cartReg<-predict(m8cartReg,newdata=newRegDat)
+
+p8cartReg<-p0a +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=pred8cartReg), color="blue", linetype="solid") +
+  ggtitle("CART decision tree regression")
+
+grid.arrange(p8cartClass,p8cartReg,ncol=2)
+```
+
+### 8.2 Random forest
+
+```{r rf}
+m8rfClass<-train(class ~ x + y, data = classDat, method = "rf", tuneGrid=data.frame(mtry=c(1,2)), trainControl=trainControl(method = "repeatedcv", number = 10, repeats = 3))
+
+newClassDat$pred8rfClass<-predict(m8rfClass,newdata=newClassDat,type="raw")
+newClassDat$pred8rfClassNum<-predict(m8rfClass,newdata=newClassDat,type="prob")[,1]
+
+p8rfClass<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred8rfClass),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred8rfClassNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("Random forest classification boundary")
+
+m8rfReg<-train(y ~ x, data = regDat, method = "rf", tuneGrid=data.frame(mtry=1), trainControl=trainControl(method = "repeatedcv", number = 10, repeats = 3))
+newRegDat$pred8rfReg<-predict(m8rfReg,newdata=newRegDat)
+
+p8rfReg<-p0a +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=pred8rfReg), color="blue", linetype="solid") +
+  ggtitle("Random forest regression")
+
+grid.arrange(p8rfClass,p8rfReg,ncol=2)
+```
+
+
+## 9. Neural networks & deep learning
+
+```{r nnets}
+# sticking to basic MLPs here
+m9mlpClass<-train(class ~ x + y, data = classDat, method = "mlp") # many other methods, e.g. nnet
+newClassDat$pred9mlpClass<-predict(m9mlpClass,newdata=newClassDat,type="raw")
+newClassDat$pred9mlpClassNum<-predict(m9mlpClass,newdata=newClassDat,type="prob")[,1]
+
+p9mlpClass<-p0b +
+  geom_point(mapping=aes(x=x,y=y,col=pred9mlpClass),data=newClassDat,size=0.2,alpha=0.5) +
+  geom_contour(mapping=aes(x=x,y=y,z=pred9mlpClassNum),data=newClassDat,breaks=0.5,color="black",lwd=0.8) + 
+  ggtitle("Neural network (MLP, 1 hidden layer) classification boundary")
+
+
+m9mlpReg<-train(y ~ x, data = regDat, method = "mlp")
+newRegDat$pred9mlpReg<-predict(m9mlpReg,newdata=newRegDat)
+
+p9mlpReg<-p0a +
+  geom_line(data=newRegDat,mapping=aes(x=x,y=pred9mlpReg), color="blue", linetype="solid") +
+  ggtitle("Neural network (MLP, 1 hidden layer) regression")
+
+grid.arrange(p9mlpClass,p9mlpReg,ncol=2)
+```
+
+
+## 10. Graphical models
+No R code for this section.
+
+
+## 11. PCA & factor analysis
+```{r pca}
+tmpDat<-classDat[,1:3]
+tmpDat[,2]<-scale(classDat[,2],center=T,scale=T)
+tmpDat[,3]<-scale(classDat[,3],center=T,scale=T)
+
+pcaObj<-prcomp(tmpDat[,2:3],retx=T)
+pcaDat<-data.frame(class=classDat$class,pcaObj$x)
+
+p11pca<-ggplot(data=pcaDat,mapping=aes(x=PC1,y=PC2,col=class,pch=class)) + 
+  geom_point(size=3) +
+  xlim(-3,3) + ylim(-3,3) +
+  coord_fixed(ratio = 1) +
+  ggtitle("PCA - rotated data")
+
+p0balt<-p0b + coord_fixed(ratio = 1)
+
+grid.arrange(p0balt,p11pca,ncol=2)
+```
+
+
+## 12. Bootstrap and resampling techniques
+
+No R code for this section.
+
